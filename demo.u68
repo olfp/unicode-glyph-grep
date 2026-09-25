@@ -1,0 +1,28 @@
+# ALGOL 68 Unicode Stropping Demo
+# This file demonstrates how plain ASCII search terms can match glyph-based code.
+
+𝐛𝐞𝐠𝐢𝐧
+    # 1. Keywords in bold glyphs
+    𝐦𝐨𝐝𝐞 𝐧𝐨𝐝𝐞 = 𝐬𝐭𝐫𝐮𝐜𝐭 (
+        𝐢𝐧𝐭 𝑣𝑎𝑙𝑢𝑒,
+        𝐫𝐞𝐟 𝐧𝐨𝐝𝐞 𝑙𝑒𝑓𝑡,
+        𝐫𝐞𝐟 𝐧𝐨𝐝𝐞 𝑟𝑖𝑔ℎ𝑡
+    );
+
+    # 2. Ordinary variable names in italic glyphs
+    𝐢𝐧𝐭 𝑛 = 10;
+    𝐫𝐞𝐟 𝐧𝐨𝐝𝐞 𝑟𝑜𝑜𝑡 := 𝐧𝐢𝐥;
+
+    # 3. Procedure definition and use
+    𝐩𝐫𝐨𝐜 𝑚𝑎𝑘𝑒𝑛𝑜𝑑𝑒 = (𝐢𝐧𝐭 𝑣) 𝐫𝐞𝐟 𝐧𝐨𝐝𝐞:
+    𝐛𝐞𝐠𝐢𝐧
+        𝐫𝐞𝐟 𝐧𝐨𝐝𝐞 𝑛𝑒𝑤 = 𝐡𝐞𝐚𝐩 𝐧𝐨𝐝𝐞;
+        𝑣𝑎𝑥𝑢𝑒 𝐨𝐟 𝑛𝑒𝑤 := 𝑣;
+        𝑟𝑖𝑔ℎ𝑡 𝐨𝐟 𝑛𝑒𝑤 := 𝐧𝐢𝐥;
+        𝑛𝑒𝑤
+    𝐞𝐧𝐝;
+
+    𝑟𝑜𝑜𝑡 := 𝑚𝑎𝑘𝑒𝑛𝑜𝑑𝑒(42);
+    𝑝𝑟𝑖𝑛𝑡(("Root value: ", 𝑣𝑎𝑙𝑢𝑒 𝐨𝐟 𝑟𝑜𝑜𝑡));
+
+𝐞𝐧𝐝
