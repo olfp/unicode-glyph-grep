@@ -8,6 +8,7 @@ all: ugrep
 
 ugrep: ugrep.c
 	$(CC) $(CFLAGS) -o $@ $<
+	chmod 755 $@
 
 install: ugrep
 	install -d $(DESTDIR)$(PREFIX)/bin
