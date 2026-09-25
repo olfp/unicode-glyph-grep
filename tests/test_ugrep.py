@@ -1,15 +1,25 @@
 import subprocess
-import sys
 import unittest
 from pathlib import Path
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "ugrep"
 
 
 def build_binary():
-    subprocess.run(["make", "-C", str(ROOT), "ugrep"], check=True,
-                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(
+        ["make", "-C", str(ROOT), "ugrep"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to build ugrep:\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
 
 
 class UnicodeGlyphGrepTests(unittest.TestCase):
@@ -53,44 +63,46 @@ class UnicodeGlyphGrepTests(unittest.TestCase):
     def test_count_mode(self):
         result = self.run_tool("-c", "value", str(ROOT / "demo.u68"))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("1", result.stdout.strip())
+        self.assertEqual(result.stdout.strip(), "2")
 
     def test_max_count(self):
-        result = self.run_tool("-m", "1", "proc", str(ROOT / "demo.u68"))
+        result = self.run_tool(
+            "-m",
+            "1",
+            "proc",
+            str(ROOT / "demo.u68"),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
 
     def test_no_unicode_short_option(self):
-        result = self.run_tool("-t", "proc", str(ROOT / "demo.u68"))
+        result = self.run_tool(
+            "-t",
+            "proc",
+            str(ROOT / "demo.u68"),
+        )
+        self.assertEqual(result.returncode, 1)
+
+    def test_no_unicode_long_option(self):
+        result = self.run_tool(
+            "--no-unicode",
+            "proc",
+            str(ROOT / "demo.u68"),
+        )
         self.assertEqual(result.returncode, 1)
 
     def test_no_match_returns_1(self):
-        result = self.run_tool("zzzz-not-present", str(ROOT / "demo.u68"))
+        result = self.run_tool(
+            "zzzz-not-present",
+            str(ROOT / "demo.u68"),
+        )
         self.assertEqual(result.returncode, 1)
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_help(self):
+        result = self.run_tool("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("demo.u68:", result.stdout)
-
-    def test_count_mode(self):
-        result = run_tool("-c", "value", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("1", result.stdout.strip())
-
-    def test_max_count(self):
-        result = run_tool("-m", "1", "proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
-
-    def test_no_unicode_short_option(self):
-        result = run_tool("-t", "proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 1)
-
-    def test_no_match_returns_1(self):
-        result = run_tool("zzzz-not-present", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 1)
+        self.assertIn("--unicode", result.stdout)
+        self.assertIn("--no-unicode", result.stdout)
 
 
 if __name__ == "__main__":
