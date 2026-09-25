@@ -394,33 +394,45 @@ int main(int argc, char **argv) {
 
     int overall = 1;
     if (paths.n == 0) {
-        char buf[8192];
-        size_t len = 0;
-        while (fgets(buf + len, sizeof(buf) - len, stdin)) {
-            len += strlen(buf + len);
-            if (len >= sizeof(buf) - 1) break;
-        }
-        char *line = buf;
-        int use_unicode = o.force_unicode || has_math_glyph(line);
-        if (!use_unicode) {
-            regfree(&re);
-            return delegate_to_grep(argc, argv, o.config);
-        }
-        for (char *p = strtok(line, "\n"); p; p = strtok(NULL, "\n")) {
+        char *line = NULL;
+        size_t cap = 0;
+        long lineno = 0;
+        long count = 0;
+        int any = 0;
+
+        while (getline(&line, &cap, stdin) >= 0) {
+            size_t len = strlen(line);
+            while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+                line[--len] = '\0';
+            }
+            ++lineno;
+
             char *norm = NULL;
-            if (normalize_text(p, &norm) != 0) die("out of memory");
+            if (normalize_text(line, &norm) != 0) die("out of memory");
+
             int match = regexec(&re, norm, 0, NULL, 0) == 0;
             free(norm);
             if (o.invert) match = !match;
-            if (match) {
-                if (!o.no_filename && o.with_filename) printf("stdin:");
-                if (o.line_number) printf("%zu:", 1UL);
-                printf("%s\n", p);
-                overall = 0;
-            }
+            if (!match) continue;
+
+            count++;
+            any = 1;
+            if (o.max_count && count > o.max_count) break;
+            if (o.quiet || o.count) continue;
+
+            if (!o.no_filename && o.with_filename) printf("stdin:");
+            if (o.line_number) printf("%ld:", lineno);
+            printf("%s\n", line);
         }
+
+        if (o.count) {
+            if (!o.no_filename && o.with_filename) printf("stdin:");
+            printf("%ld\n", count);
+        }
+
+        free(line);
         regfree(&re);
-        return overall;
+        return any ? 0 : 1;
     }
 
     int multi = paths.n > 1;
