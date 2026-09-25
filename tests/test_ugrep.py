@@ -32,6 +32,21 @@ class UnicodeGlyphGrepTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
 
+    def test_with_filename_option(self):
+        result = run_tool("-H", "proc", str(ROOT / "demo.u68"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("demo.u68:", result.stdout)
+
+    def test_count_mode(self):
+        result = run_tool("-c", "value", str(ROOT / "demo.u68"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1", result.stdout.strip())
+
+    def test_max_count(self):
+        result = run_tool("-m", "1", "proc", str(ROOT / "demo.u68"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
+
     def test_no_match_returns_1(self):
         result = run_tool("zzzz-not-present", str(ROOT / "demo.u68"))
         self.assertEqual(result.returncode, 1)

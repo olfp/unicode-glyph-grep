@@ -18,8 +18,20 @@ def normalize_for_search(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
 
-def search_files(paths, pattern, *, ignore_case=False, invert=False,
-                 line_numbers=False, quiet=False):
+def search_files(
+    paths,
+    pattern,
+    *,
+    ignore_case=False,
+    invert=False,
+    line_numbers=False,
+    quiet=False,
+    with_filename=False,
+    no_filename=False,
+    count_matches=False,
+    max_count=None,
+    recursive=False,
+):
     flags = re.IGNORECASE if ignore_case else 0
     regex = re.compile(pattern, flags)
     file_list = []
@@ -29,9 +41,13 @@ def search_files(paths, pattern, *, ignore_case=False, invert=False,
         if path == "-":
             stdin_requested = True
             continue
+
         candidate = Path(path)
         if candidate.is_dir():
-            file_list.extend(sorted(p for p in candidate.rglob("*") if p.is_file()))
+            if recursive:
+                file_list.extend(sorted(p for p in candidate.rglob("*") if p.is_file()))
+            elif candidate.is_file():
+                file_list.append(candidate)
         elif candidate.is_file():
             file_list.append(candidate)
 
@@ -42,26 +58,48 @@ def search_files(paths, pattern, *, ignore_case=False, invert=False,
     multiple_files = len(file_list) > 1
 
     for file_path in file_list:
-        lines = sys.stdin if file_path == Path("-") else open(
+        local_matches = 0
+        handle = sys.stdin if file_path == Path("-") else open(
             file_path, "r", encoding="utf-8", errors="surrogateescape"
         )
         try:
-            for lineno, raw_line in enumerate(lines, 1):
+            for lineno, raw_line in enumerate(handle, 1):
                 line = raw_line.rstrip("\n")
-                matched = bool(regex.search(normalize_for_search(line)))
+                normalized = normalize_for_search(line)
+                matched = bool(regex.search(normalized))
                 if invert:
                     matched = not matched
                 if not matched:
                     continue
+
+                local_matches += 1
                 matched_any = True
-                if quiet:
+
+                if max_count is not None and local_matches > max_count:
+                    break
+
+                if count_matches or quiet:
                     continue
+
                 prefix = f"{lineno}:" if line_numbers else ""
-                filename = f"{file_path}:" if multiple_files and file_path != Path("-") else ""
-                print(f"{filename}{prefix}{line}")
+                filename_prefix = ""
+                if with_filename:
+                    filename_prefix = f"{file_path}:"
+                elif multiple_files and file_path != Path("-"):
+                    filename_prefix = f"{file_path}:"
+                if no_filename:
+                    filename_prefix = ""
+
+                print(f"{filename_prefix}{prefix}{line}")
         finally:
             if file_path != Path("-"):
-                lines.close()
+                handle.close()
+
+        if count_matches:
+            if with_filename or (multiple_files and file_path != Path("-") ):
+                print(f"{file_path}:{local_matches}")
+            else:
+                print(local_matches)
 
     return 0 if matched_any else 1
 
@@ -79,7 +117,18 @@ def main(argv=None):
     parser.add_argument("-r", "--recursive", action="store_true",
                         help="Recursively search directories")
     parser.add_argument("-v", "--invert-match", action="store_true")
+    parser.add_argument("-H", "--with-filename", action="store_true",
+                        help="Print file name with matches even for a single file")
+    parser.add_argument("-h", "--no-filename", action="store_true",
+                        help="Suppress filename prefixing")
+    parser.add_argument("-c", "--count", action="store_true",
+                        help="Count matching lines instead of printing them")
+    parser.add_argument("-m", "--max-count", type=int,
+                        help="Stop after N matches per file")
     args = parser.parse_args(argv)
+
+    if args.with_filename and args.no_filename:
+        parser.error("-H/--with-filename and -h/--no-filename cannot be used together")
 
     pattern = args.regexp if args.regexp is not None else args.pattern
     if pattern is None:
@@ -93,6 +142,11 @@ def main(argv=None):
         invert=args.invert_match,
         line_numbers=args.line_number,
         quiet=args.quiet,
+        with_filename=args.with_filename,
+        no_filename=args.no_filename,
+        count_matches=args.count,
+        max_count=args.max_count,
+        recursive=args.recursive,
     )
 
 
