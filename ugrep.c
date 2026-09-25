@@ -15,7 +15,7 @@
 
 typedef struct {
     int line_number, quiet, with_filename, no_filename, count, invert;
-    int force_unicode, force_plain, recursive;
+    int force_unicode, force_plain, recursive, ignore_case;
     long max_count, probe_lines;
     const char *pattern;
     const char *config;
@@ -226,10 +226,11 @@ static int delegate_to_grep(int argc, char **argv, const char *config) {
 
     for (int i = 1; i < argc; ++i) {
         const char *a = argv[i];
-        if (strcmp(a, "-u") == 0 || strcmp(a, "--unicode") == 0 == 0) continue;
+        if (strcmp(a, "-u") == 0 || strcmp(a, "--unicode") == 0) continue;
         if (strcmp(a, "-t") == 0 || strcmp(a, "--no-unicode") == 0) continue;
         if (strcmp(a, "--probe-lines") == 0 || strcmp(a, "--config") == 0) { ++i; continue; }
         if (strncmp(a, "--probe-lines=", 14) == 0 || strncmp(a, "--config=", 9) == 0) continue;
+        if (strcmp(a, "-i") == 0 || strcmp(a, "--ignore-case") == 0) continue;
         av[n++] = argv[i];
     }
     av[n] = NULL;
@@ -308,7 +309,7 @@ static void help(void) {
     puts("  -c, --count             count matching lines");
     puts("  -m N, --max-count N     stop after N matches");
     puts("  -u, --unicode           force Unicode normalization mode");
-    puts("  -t, --no-unicode       force the real system grep");
+    puts("  -t, --no-unicode        use the real system grep");
     puts("  -r, --recursive         search directories recursively");
     puts("      --probe-lines N     inspect N initial lines for glyph detection");
     puts("      --config FILE       use a config file");
@@ -337,7 +338,7 @@ int main(int argc, char **argv) {
         } else if (strcmp(a, "-H") == 0 || strcmp(a, "--with-filename") == 0) {
             o.with_filename = 1;
         } else if (strcmp(a, "-i") == 0 || strcmp(a, "--ignore-case") == 0) {
-            /* handled by REG_ICASE */
+            o.ignore_case = 1;
         } else if (strcmp(a, "-u") == 0 || strcmp(a, "--unicode") == 0) {
             o.force_unicode = 1;
         } else if (strcmp(a, "-t") == 0 || strcmp(a, "--no-unicode") == 0) {
@@ -367,7 +368,6 @@ int main(int argc, char **argv) {
             if (i + 1 >= argc) die("missing regex");
             o.pattern = argv[++i];
         } else if (a[0] == '-') {
-            /* Drop unknown flags; they are used by system grep in pass-through mode. */
             continue;
         } else if (!o.pattern) {
             o.pattern = a;
@@ -388,7 +388,7 @@ int main(int argc, char **argv) {
     if (!o.pattern) die("a pattern is required");
 
     int flags = REG_EXTENDED;
-    if (o.count) flags |= REG_NOSUB;
+    if (o.ignore_case) flags |= REG_ICASE;
     regex_t re;
     if (regcomp(&re, o.pattern, flags) != 0) die("invalid regular expression");
 
@@ -406,7 +406,6 @@ int main(int argc, char **argv) {
             regfree(&re);
             return delegate_to_grep(argc, argv, o.config);
         }
-        /* Simplified stdin path: match over the buffered whole input. */
         for (char *p = strtok(line, "\n"); p; p = strtok(NULL, "\n")) {
             char *norm = NULL;
             if (normalize_text(p, &norm) != 0) die("out of memory");
