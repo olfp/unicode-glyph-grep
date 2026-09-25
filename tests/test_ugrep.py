@@ -9,6 +9,19 @@ BINARY = ROOT / "ugrep"
 
 def build_binary():
     result = subprocess.run(
+        ["make", "-C", str(ROOT), "clean"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to clean build:\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+    result = subprocess.run(
         ["make", "-C", str(ROOT), "ugrep"],
         capture_output=True,
         text=True,
