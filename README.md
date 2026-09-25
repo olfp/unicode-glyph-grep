@@ -1,43 +1,31 @@
 # ugrep
 
-`ugrep` is a grep-like command for source files containing Unicode mathematical
-alphanumeric glyphs. It normalizes matching text with Unicode NFKC, so `proc`
-can match `𝐩𝐫𝐨𝐜`, while output remains the original source line.
+`ugrep` is a grep-like C command for source files containing Unicode mathematical
+alphanumeric glyphs. It normalizes common mathematical alphanumeric symbols, so
+`proc` can match `𝐩𝐫𝐨𝐜`, while output remains the original source line.
+
+Build and install:
 
 ```sh
-./ugrep -n proc program.u68
+make
+sudo make install                 # installs /usr/local/bin/ugrep
+make PREFIX="$HOME/.local" install
 ```
 
-## Modes and options
+The command supports automatic glyph detection, Unicode mode (`-u`), system-grep
+mode (`-t`), line numbers (`-n`), counts (`-c`), recursive searches (`-r`), and
+standard filename controls. Ordinary files are delegated to `/usr/bin/grep` by
+default; this prevents recursion if `ugrep` is also installed as `grep`.
 
-By default, regular files are probed for mathematical glyphs. The first 100
-lines are inspected (configurable below). Unicode files use normalized matching;
-ordinary files are delegated to the configured system grep. Pipes are buffered
-because stdin cannot be rewound.
-
-```text
--h, --no-filename       suppress filename prefixes
--H, --with-filename     always print filename prefixes
--n, --line-number       print line numbers
-a, --ignore-case        ignore case
--v, --invert-match      select non-matching lines
--c, --count             print matching-line counts
--m N, --max-count N     stop after N matches per input
--r, --recursive         search directories recursively
--u, --unicode           force Unicode normalization mode
--t, --no-unicode        force the system grep path
---probe-lines N         inspect N initial lines for glyph detection
---config FILE           select a configuration file
---help                  show help
+```sh
+ugrep -n proc program.u68
+ugrep -u proc program.u68
+ugrep -t error ordinary.log
+some-command | ugrep -n proc
 ```
 
-`/usr/bin/grep` is used by default for pass-through mode, so installing or
-symlinking `ugrep` as `grep` does not recurse into `ugrep`.
-
-## `.ugreprc`
-
-`ugrep` reads `.ugreprc` in the current directory, then `~/.ugreprc`. Use
-`--config FILE` to select another file. Current-directory configuration wins.
+The first 100 lines are probed by default. `.ugreprc` is read from the current
+directory, then `$HOME/.ugreprc`:
 
 ```ini
 [ugrep]
@@ -45,11 +33,9 @@ probe_lines = 100
 grep = /usr/bin/grep
 ```
 
-`probe_lines` controls the detection window. `grep` selects the system grep
-executable. Command-line options override configuration values.
+Use `--probe-lines N` or `--config FILE` to override these settings. Run
+`ugrep --help` for the complete option list.
 
-## Tests
-
-```sh
-python3 -m unittest discover -s tests -v
-```
+The C implementation has no external runtime dependencies; it uses POSIX regex
+and UTF-8 decoding. The glyph conversion table covers the mathematical
+alphanumeric blocks used by the project.
