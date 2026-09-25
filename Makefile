@@ -17,4 +17,4 @@ clean:
 	rm -f ugrep
 
 test: ugrep
-	./ugrep -n proc demo.u68
+	python3 -m unittest discover -s tests -v
