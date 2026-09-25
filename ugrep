@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
-"""Search ordinary text in files containing Unicode mathematical glyphs.
+"""grep-compatible search with Unicode mathematical-glyph matching.
 
-NFKC normalization makes patterns such as ``proc`` match ``𝐩𝐫𝐨𝐜`` while
-matching lines are printed in their original form.
+By default, ugrep probes the beginning of each regular file. Files containing
+ALGOL 68 mathematical glyphs are searched after NFKC normalization; ordinary
+files are delegated to the real system grep. Use -u to force Unicode mode and
+-N to force the system grep path.
 """
 
 from __future__ import annotations
 
 import argparse
+import configparser
 import re
+import shutil
+import subprocess
 import sys
 import unicodedata
 from pathlib import Path
+
+DEFAULT_PROBE_LINES = 100
+DEFAULT_GREP = "/usr/bin/grep"
 
 
 def normalize_for_search(text: str) -> str:
@@ -19,175 +27,209 @@ def normalize_for_search(text: str) -> str:
 
 
 def contains_unicode_glyph(text: str) -> bool:
-    """Return True if text contains mathematical alphanumeric glyphs."""
-    for ch in text:
-        code = ord(ch)
-        if 0x1D400 <= code <= 0x1D7FF:
-            return True
-        if ch in {"ℎ", "ℏ"}:
-            return True
-    return False
+    """Return whether text contains a supported mathematical glyph."""
+    return any(
+        0x1D400 <= ord(char) <= 0x1D7FF or char in {"ℎ", "ℏ"}
+        for char in text
+    )
 
 
-def search_files(
-    paths,
-    pattern,
-    *,
-    ignore_case=False,
-    invert=False,
-    line_numbers=False,
-    quiet=False,
-    with_filename=False,
-    no_filename=False,
-    count_matches=False,
-    max_count=None,
-    recursive=False,
-    unicode_mode=False,
-    probe_lines=100,
-):
-    flags = re.IGNORECASE if ignore_case else 0
-    regex = re.compile(pattern, flags)
-    file_list = []
-    stdin_requested = False
+def read_config(path: Path | None = None) -> dict[str, str]:
+    """Read .ugreprc from the current directory, then the user's home.
 
-    for path in paths:
-        if path == "-":
-            stdin_requested = True
+    A file explicitly supplied with --config takes precedence. The file uses
+    an optional [ugrep] section and simple keys such as probe_lines and grep.
+    """
+    candidates = [path] if path else [Path.cwd() / ".ugreprc", Path.home() / ".ugreprc"]
+    parser = configparser.ConfigParser()
+    for candidate in candidates:
+        if candidate and candidate.is_file():
+            parser.read(candidate, encoding="utf-8")
+            section = parser["ugrep"] if parser.has_section("ugrep") else parser.defaults()
+            return {key: value for key, value in section.items()}
+    return {}
+
+
+def grep_program(config: dict[str, str]) -> str:
+    configured = config.get("grep", DEFAULT_GREP)
+    if Path(configured).is_file() and Path(configured).stat().st_mode & 0o111:
+        return configured
+    found = shutil.which(configured)
+    if found:
+        return found
+    if Path(DEFAULT_GREP).is_file():
+        return DEFAULT_GREP
+    raise FileNotFoundError("could not find the system grep executable")
+
+
+def remove_ugrep_options(argv: list[str]) -> list[str]:
+    """Remove options understood only by ugrep before invoking system grep."""
+    result = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
             continue
+        if arg in {"-u", "--unicode", "-N", "--no-unicode"}:
+            continue
+        if arg in {"--probe-lines", "--config"}:
+            skip_next = True
+            continue
+        if arg.startswith("--probe-lines=") or arg.startswith("--config="):
+            continue
+        result.append(arg)
+    return result
 
-        candidate = Path(path)
-        if candidate.is_dir():
-            if recursive:
-                file_list.extend(sorted(p for p in candidate.rglob("*") if p.is_file()))
-            elif candidate.is_file():
-                file_list.append(candidate)
-        elif candidate.is_file():
-            file_list.append(candidate)
 
-    if stdin_requested:
-        file_list.append(Path("-"))
+def run_system_grep(argv: list[str], input_text: str | None, config: dict[str, str]) -> int:
+    command = [grep_program(config), *remove_ugrep_options(argv)]
+    completed = subprocess.run(command, input=input_text, text=True)
+    return completed.returncode
 
+
+def search_lines(lines, regex, *, ignore_case=False, invert=False,
+                 line_numbers=False, quiet=False, with_filename=False,
+                 no_filename=False, count_matches=False, max_count=None,
+                 filename=None, multiple_files=False):
     matched_any = False
-    multiple_files = len(file_list) > 1
-
-    for file_path in file_list:
-        local_matches = 0
-        if file_path == Path("-"):
-            handle = sys.stdin
-            use_unicode = unicode_mode
-            if not use_unicode:
-                # We cannot rewind stdin, so only the current implementation can
-                # make a best effort by normalizing the data it sees in stream.
-                use_unicode = True
-            file_lines = []
-            for raw_line in handle:
-                file_lines.append(raw_line.rstrip("\n"))
-            stream_lines = file_lines
-        else:
-            with open(file_path, "r", encoding="utf-8", errors="surrogateescape") as handle:
-                file_lines = handle.readlines()
-            stream_lines = file_lines
-            use_unicode = unicode_mode or any(
-                contains_unicode_glyph("\n".join(file_lines[:probe_lines]))
-            )
-
-        if not use_unicode:
-            # Fall back to plain grep semantics for ASCII-only files.
-            import subprocess
-            try:
-                subprocess.run(["grep", *([] if not ignore_case else ["-i"]), pattern, str(file_path)],
-                               check=False)
-            except FileNotFoundError:
-                pass
+    count = 0
+    for lineno, line in enumerate(lines, 1):
+        matched = bool(regex.search(normalize_for_search(line)))
+        if invert:
+            matched = not matched
+        if not matched:
             continue
+        count += 1
+        matched_any = True
+        if max_count is not None and count > max_count:
+            break
+        if count_matches or quiet:
+            continue
+        filename_prefix = ""
+        if not no_filename and (with_filename or (multiple_files and filename)):
+            filename_prefix = f"{filename}:"
+        line_prefix = f"{lineno}:" if line_numbers else ""
+        print(f"{filename_prefix}{line_prefix}{line}")
+    if count_matches:
+        prefix = f"{filename}:" if filename and not no_filename and (with_filename or multiple_files) else ""
+        print(f"{prefix}{count}")
+    return matched_any
 
-        for lineno, line in enumerate(stream_lines, 1):
-            normalized = normalize_for_search(line)
-            matched = bool(regex.search(normalized))
-            if invert:
-                matched = not matched
-            if not matched:
-                continue
 
-            local_matches += 1
-            matched_any = True
-
-            if max_count is not None and local_matches > max_count:
-                break
-
-            if count_matches or quiet:
-                continue
-
-            prefix = f"{lineno}:" if line_numbers else ""
-            filename_prefix = ""
-            if with_filename:
-                filename_prefix = f"{file_path}:"
-            elif multiple_files and file_path != Path("-"):
-                filename_prefix = f"{file_path}:"
-            if no_filename:
-                filename_prefix = ""
-
-            print(f"{filename_prefix}{prefix}{line}")
-
-        if count_matches:
-            if with_filename or (multiple_files and file_path != Path("-") ):
-                print(f"{file_path}:{local_matches}")
-            else:
-                print(local_matches)
-
-    return 0 if matched_any else 1
+def search_unicode_file(path: Path, args, regex, multiple_files: bool) -> bool:
+    with path.open("r", encoding="utf-8", errors="surrogateescape") as handle:
+        return search_lines(
+            (line.rstrip("\n") for line in handle), regex,
+            ignore_case=args.ignore_case, invert=args.invert_match,
+            line_numbers=args.line_number, quiet=args.quiet,
+            with_filename=args.with_filename, no_filename=args.no_filename,
+            count_matches=args.count, max_count=args.max_count,
+            filename=str(path), multiple_files=multiple_files,
+        )
 
 
 def main(argv=None):
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
-        description="Search ASCII patterns in Unicode mathematical glyph source."
+        description="Search ASCII patterns in Unicode mathematical-glyph source.",
+        add_help=False,
     )
-    parser.add_argument("pattern", nargs="?", help="Regular expression to search for")
-    parser.add_argument("paths", nargs="*", help="Files or directories; default: stdin")
-    parser.add_argument("-e", "--regexp", help="Pattern supplied separately")
+    parser.add_argument("--help", action="help", help="show this help message and exit")
+    parser.add_argument("pattern", nargs="?", help="regular expression to search for")
+    parser.add_argument("paths", nargs="*", help="files or directories; default: stdin")
+    parser.add_argument("-e", "--regexp")
     parser.add_argument("-i", "--ignore-case", action="store_true")
     parser.add_argument("-n", "--line-number", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
-    parser.add_argument("-r", "--recursive", action="store_true",
-                        help="Recursively search directories")
+    parser.add_argument("-r", "--recursive", action="store_true")
     parser.add_argument("-v", "--invert-match", action="store_true")
-    parser.add_argument("-H", "--with-filename", action="store_true",
-                        help="Print file name with matches even for a single file")
+    parser.add_argument("-H", "--with-filename", action="store_true")
     parser.add_argument("-h", "--no-filename", action="store_true",
-                        help="Suppress filename prefixing")
-    parser.add_argument("-c", "--count", action="store_true",
-                        help="Count matching lines instead of printing them")
-    parser.add_argument("-m", "--max-count", type=int,
-                        help="Stop after N matches per file")
+                        help="suppress filename prefixing")
+    parser.add_argument("-c", "--count", action="store_true")
+    parser.add_argument("-m", "--max-count", type=int)
     parser.add_argument("-u", "--unicode", action="store_true",
-                        help="Force Unicode glyph mode even when the file looks ASCII-only")
-    parser.add_argument("--probe-lines", type=int, default=100,
-                        help="Number of initial lines to inspect for Unicode glyphs")
-    args = parser.parse_args(argv)
+                        help="force Unicode normalization mode")
+    parser.add_argument("-N", "--no-unicode", action="store_true",
+                        help="force the real system grep")
+    parser.add_argument("--probe-lines", type=int,
+                        help="number of initial lines to inspect (default: 100 or .ugreprc)")
+    parser.add_argument("--config", type=Path, help="read this .ugreprc instead of the defaults")
+    args, unknown = parser.parse_known_args(raw_argv)
 
     if args.with_filename and args.no_filename:
         parser.error("-H/--with-filename and -h/--no-filename cannot be used together")
+    if args.unicode and args.no_unicode:
+        parser.error("-u/--unicode and -N/--no-unicode cannot be used together")
+
+    config = read_config(args.config)
+    try:
+        probe_lines = args.probe_lines if args.probe_lines is not None else int(
+            config.get("probe_lines", DEFAULT_PROBE_LINES)
+        )
+    except ValueError:
+        parser.error("probe_lines in .ugreprc must be an integer")
+    if probe_lines < 1:
+        parser.error("--probe-lines must be at least 1")
 
     pattern = args.regexp if args.regexp is not None else args.pattern
     if pattern is None:
         parser.error("a pattern is required")
+    if unknown:
+        # Preserve grep extensions in pass-through mode, but report them for
+        # forced Unicode mode where this Python implementation cannot interpret them.
+        if args.unicode:
+            parser.error("unrecognized arguments in Unicode mode: " + " ".join(unknown))
 
     paths = args.paths or ["-"]
-    return search_files(
-        paths,
-        pattern,
-        ignore_case=args.ignore_case,
-        invert=args.invert_match,
-        line_numbers=args.line_number,
-        quiet=args.quiet,
-        with_filename=args.with_filename,
-        no_filename=args.no_filename,
-        count_matches=args.count,
-        max_count=args.max_count,
-        recursive=args.recursive,
-        unicode_mode=args.unicode,
-        probe_lines=args.probe_lines,
-    )
+    if args.no_unicode:
+        return run_system_grep(raw_argv, None, config)
+
+    files = []
+    stdin_requested = False
+    for value in paths:
+        if value == "-":
+            stdin_requested = True
+        else:
+            path = Path(value)
+            if path.is_dir() and args.recursive:
+                files.extend(sorted(p for p in path.rglob("*") if p.is_file()))
+            elif path.is_file():
+                files.append(path)
+    if stdin_requested or not files:
+        data = sys.stdin.read()
+        prefix = data.splitlines()[:probe_lines]
+        use_unicode = args.unicode or contains_unicode_glyph("\n".join(prefix))
+        if not use_unicode:
+            return run_system_grep(raw_argv, data, config)
+        flags = re.IGNORECASE if args.ignore_case else 0
+        regex = re.compile(pattern, flags)
+        matched = search_lines(
+            data.splitlines(), regex, invert=args.invert_match,
+            line_numbers=args.line_number, quiet=args.quiet,
+            with_filename=args.with_filename, no_filename=args.no_filename,
+            count_matches=args.count, max_count=args.max_count,
+        )
+        return 0 if matched else 1
+
+    multiple_files = len(files) > 1
+    overall_match = False
+    flags = re.IGNORECASE if args.ignore_case else 0
+    regex = re.compile(pattern, flags)
+    for path in files:
+        with path.open("r", encoding="utf-8", errors="surrogateescape") as handle:
+            prefix = [line.rstrip("\n") for _, line in zip(range(probe_lines), handle)]
+            use_unicode = args.unicode or contains_unicode_glyph("\n".join(prefix))
+        if not use_unicode:
+            # Delegate an ASCII-only file to grep. Do this one file at a time so
+            # mixed Unicode/ASCII file lists retain correct automatic detection.
+            code = run_system_grep([*raw_argv[:-1], str(path)] if raw_argv and raw_argv[-1] == str(path) else [*raw_argv, str(path)], None, config)
+            if code == 0:
+                overall_match = True
+            continue
+        if search_unicode_file(path, args, regex, multiple_files):
+            overall_match = True
+    return 0 if overall_match else 1
 
 
 if __name__ == "__main__":
