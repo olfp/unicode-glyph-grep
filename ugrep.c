@@ -10,7 +10,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define DEFAULT_PROBE_LINES 100
+#define DEFAULT_PROBE_LINES 20
 #define DEFAULT_GREP "/usr/bin/grep"
 
 typedef struct { int line_number, quiet, with_filename, no_filename, count, invert, force_unicode, force_plain, recursive; long max_count, probe_lines; const char *pattern; const char *config; } Options;
