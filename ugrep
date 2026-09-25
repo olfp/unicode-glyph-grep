@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Search ordinary text in files containing Unicode mathematical glyphs.
+
+NFKC normalization makes patterns such as ``proc`` match ``𝐩𝐫𝐨𝐜`` while
+matching lines are printed in their original form.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+
+def normalize_for_search(text: str) -> str:
+    return unicodedata.normalize("NFKC", text)
+
+
+def search_files(paths, pattern, *, ignore_case=False, invert=False,
+                 line_numbers=False, quiet=False):
+    flags = re.IGNORECASE if ignore_case else 0
+    regex = re.compile(pattern, flags)
+    file_list = []
+    stdin_requested = False
+
+    for path in paths:
+        if path == "-":
+            stdin_requested = True
+            continue
+        candidate = Path(path)
+        if candidate.is_dir():
+            file_list.extend(sorted(p for p in candidate.rglob("*") if p.is_file()))
+        elif candidate.is_file():
+            file_list.append(candidate)
+
+    if stdin_requested:
+        file_list.append(Path("-"))
+
+    matched_any = False
+    multiple_files = len(file_list) > 1
+
+    for file_path in file_list:
+        lines = sys.stdin if file_path == Path("-") else open(
+            file_path, "r", encoding="utf-8", errors="surrogateescape"
+        )
+        try:
+            for lineno, raw_line in enumerate(lines, 1):
+                line = raw_line.rstrip("\n")
+                matched = bool(regex.search(normalize_for_search(line)))
+                if invert:
+                    matched = not matched
+                if not matched:
+                    continue
+                matched_any = True
+                if quiet:
+                    continue
+                prefix = f"{lineno}:" if line_numbers else ""
+                filename = f"{file_path}:" if multiple_files and file_path != Path("-") else ""
+                print(f"{filename}{prefix}{line}")
+        finally:
+            if file_path != Path("-"):
+                lines.close()
+
+    return 0 if matched_any else 1
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Search ASCII patterns in Unicode mathematical glyph source."
+    )
+    parser.add_argument("pattern", nargs="?", help="Regular expression to search for")
+    parser.add_argument("paths", nargs="*", help="Files or directories; default: stdin")
+    parser.add_argument("-e", "--regexp", help="Pattern supplied separately")
+    parser.add_argument("-i", "--ignore-case", action="store_true")
+    parser.add_argument("-n", "--line-number", action="store_true")
+    parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("-r", "--recursive", action="store_true",
+                        help="Recursively search directories")
+    parser.add_argument("-v", "--invert-match", action="store_true")
+    args = parser.parse_args(argv)
+
+    pattern = args.regexp if args.regexp is not None else args.pattern
+    if pattern is None:
+        parser.error("a pattern is required")
+
+    paths = args.paths or ["-"]
+    return search_files(
+        paths,
+        pattern,
+        ignore_case=args.ignore_case,
+        invert=args.invert_match,
+        line_numbers=args.line_number,
+        quiet=args.quiet,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
