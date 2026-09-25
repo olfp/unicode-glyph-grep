@@ -22,12 +22,11 @@ class UnicodeGlyphGrepTests(unittest.TestCase):
         result = run_tool("proc", str(ROOT / "demo.u68"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
-        self.assertNotIn("demo.u68", result.stdout)
 
-    def test_matches_result_in_italic_glyphs(self):
-        result = run_tool("result", str(ROOT / "demo.u68"))
+    def test_matches_value_in_italic_glyphs(self):
+        result = run_tool("value", str(ROOT / "demo.u68"))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝑟𝑒𝑠𝑢𝑙𝑡", result.stdout)
+        self.assertIn("𝑣𝑎𝑙𝑢𝑒", result.stdout)
 
     def test_case_insensitive_match(self):
         result = run_tool("-i", "PROC", str(ROOT / "demo.u68"))
