@@ -18,6 +18,17 @@ def normalize_for_search(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
 
+def contains_unicode_glyph(text: str) -> bool:
+    """Return True if text contains mathematical alphanumeric glyphs."""
+    for ch in text:
+        code = ord(ch)
+        if 0x1D400 <= code <= 0x1D7FF:
+            return True
+        if ch in {"ℎ", "ℏ"}:
+            return True
+    return False
+
+
 def search_files(
     paths,
     pattern,
@@ -31,6 +42,8 @@ def search_files(
     count_matches=False,
     max_count=None,
     recursive=False,
+    unicode_mode=False,
+    probe_lines=100,
 ):
     flags = re.IGNORECASE if ignore_case else 0
     regex = re.compile(pattern, flags)
@@ -59,41 +72,62 @@ def search_files(
 
     for file_path in file_list:
         local_matches = 0
-        handle = sys.stdin if file_path == Path("-") else open(
-            file_path, "r", encoding="utf-8", errors="surrogateescape"
-        )
-        try:
-            for lineno, raw_line in enumerate(handle, 1):
-                line = raw_line.rstrip("\n")
-                normalized = normalize_for_search(line)
-                matched = bool(regex.search(normalized))
-                if invert:
-                    matched = not matched
-                if not matched:
-                    continue
+        if file_path == Path("-"):
+            handle = sys.stdin
+            use_unicode = unicode_mode
+            if not use_unicode:
+                # We cannot rewind stdin, so only the current implementation can
+                # make a best effort by normalizing the data it sees in stream.
+                use_unicode = True
+            file_lines = []
+            for raw_line in handle:
+                file_lines.append(raw_line.rstrip("\n"))
+            stream_lines = file_lines
+        else:
+            with open(file_path, "r", encoding="utf-8", errors="surrogateescape") as handle:
+                file_lines = handle.readlines()
+            stream_lines = file_lines
+            use_unicode = unicode_mode or any(
+                contains_unicode_glyph("\n".join(file_lines[:probe_lines]))
+            )
 
-                local_matches += 1
-                matched_any = True
+        if not use_unicode:
+            # Fall back to plain grep semantics for ASCII-only files.
+            import subprocess
+            try:
+                subprocess.run(["grep", *([] if not ignore_case else ["-i"]), pattern, str(file_path)],
+                               check=False)
+            except FileNotFoundError:
+                pass
+            continue
 
-                if max_count is not None and local_matches > max_count:
-                    break
+        for lineno, line in enumerate(stream_lines, 1):
+            normalized = normalize_for_search(line)
+            matched = bool(regex.search(normalized))
+            if invert:
+                matched = not matched
+            if not matched:
+                continue
 
-                if count_matches or quiet:
-                    continue
+            local_matches += 1
+            matched_any = True
 
-                prefix = f"{lineno}:" if line_numbers else ""
+            if max_count is not None and local_matches > max_count:
+                break
+
+            if count_matches or quiet:
+                continue
+
+            prefix = f"{lineno}:" if line_numbers else ""
+            filename_prefix = ""
+            if with_filename:
+                filename_prefix = f"{file_path}:"
+            elif multiple_files and file_path != Path("-"):
+                filename_prefix = f"{file_path}:"
+            if no_filename:
                 filename_prefix = ""
-                if with_filename:
-                    filename_prefix = f"{file_path}:"
-                elif multiple_files and file_path != Path("-"):
-                    filename_prefix = f"{file_path}:"
-                if no_filename:
-                    filename_prefix = ""
 
-                print(f"{filename_prefix}{prefix}{line}")
-        finally:
-            if file_path != Path("-"):
-                handle.close()
+            print(f"{filename_prefix}{prefix}{line}")
 
         if count_matches:
             if with_filename or (multiple_files and file_path != Path("-") ):
@@ -125,6 +159,10 @@ def main(argv=None):
                         help="Count matching lines instead of printing them")
     parser.add_argument("-m", "--max-count", type=int,
                         help="Stop after N matches per file")
+    parser.add_argument("-u", "--unicode", action="store_true",
+                        help="Force Unicode glyph mode even when the file looks ASCII-only")
+    parser.add_argument("--probe-lines", type=int, default=100,
+                        help="Number of initial lines to inspect for Unicode glyphs")
     args = parser.parse_args(argv)
 
     if args.with_filename and args.no_filename:
@@ -147,6 +185,8 @@ def main(argv=None):
         count_matches=args.count,
         max_count=args.max_count,
         recursive=args.recursive,
+        unicode_mode=args.unicode,
+        probe_lines=args.probe_lines,
     )
 
 
