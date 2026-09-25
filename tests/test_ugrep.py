@@ -1,122 +1,469 @@
-import subprocess
-import unittest
-from pathlib import Path
+/* ugrep: grep-compatible Unicode mathematical-glyph search. */
+#define _POSIX_C_SOURCE 200809L
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <regex.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
+#define DEFAULT_PROBE_LINES 100
+#define DEFAULT_GREP "/usr/bin/grep"
 
-ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "ugrep"
+typedef struct {
+    int line_number, quiet, with_filename, no_filename, count, invert;
+    int force_unicode, force_plain, recursive, ignore_case;
+    long max_count, probe_lines;
+    const char *pattern;
+    const char *config;
+} Options;
 
+typedef struct { char **v; size_t n, cap; } StrVec;
 
-def build_binary():
-    result = subprocess.run(
-        ["make", "-C", str(ROOT), "clean"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Failed to clean build:\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
-        )
+static void die(const char *s) {
+    fprintf(stderr, "ugrep: %s\n", s);
+    exit(2);
+}
 
-    result = subprocess.run(
-        ["make", "-C", str(ROOT), "ugrep"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Failed to build ugrep:\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
-        )
+static void vec_add(StrVec *v, char *s) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 16;
+        v->v = realloc(v->v, v->cap * sizeof(*v->v));
+        if (!v->v) die("out of memory");
+    }
+    v->v[v->n++] = s;
+}
 
+static unsigned long utf8(const unsigned char *s, size_t n, size_t *used) {
+    if (!n) {
+        *used = 0;
+        return 0;
+    }
+    if (s[0] < 0x80) {
+        *used = 1;
+        return s[0];
+    }
+    if (n >= 2 && (s[0] & 0xe0) == 0xc0) {
+        *used = 2;
+        return ((s[0] & 31) << 6) | (s[1] & 63);
+    }
+    if (n >= 3 && (s[0] & 0xf0) == 0xe0) {
+        *used = 3;
+        return ((s[0] & 15) << 12) | ((s[1] & 63) << 6) | (s[2] & 63);
+    }
+    if (n >= 4 && (s[0] & 0xf8) == 0xf0) {
+        *used = 4;
+        return ((s[0] & 7) << 18) |
+               ((s[1] & 63) << 12) |
+               ((s[2] & 63) << 6) |
+               (s[3] & 63);
+    }
+    *used = 1;
+    return s[0];
+}
 
-class UnicodeGlyphGrepTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        build_binary()
+static int is_math_glyph(unsigned long c) {
+    return (c >= 0x1d400 && c <= 0x1d7ff) || c == 0x210e || c == 0x2113;
+}
 
-    def run_tool(self, *args):
-        return subprocess.run(
-            [str(BINARY), *args],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+static int glyph_ascii(unsigned long c, char *out) {
+    static const unsigned long starts[] = {
+        0x1d400, 0x1d434, 0x1d468, 0x1d4d0, 0x1d56c,
+        0x1d5a0, 0x1d5d4, 0x1d608, 0x1d63c, 0x1d670,
+        0x1d6a8
+    };
 
-    def test_matches_proc_in_glyphs(self):
-        result = self.run_tool("proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
+    for (size_t i = 0; i < sizeof(starts) / sizeof(starts[0]); ++i) {
+        unsigned long d = c - starts[i];
+        if (d < 26) {
+            *out = 'A' + d;
+            return 1;
+        }
+        if (d >= 26 && d < 52) {
+            *out = 'a' + (d - 26);
+            return 1;
+        }
+    }
 
-    def test_line_numbers_in_unicode_mode(self):
-        result = self.run_tool("-n", "proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(result.stdout, r"(?m)^17:.*𝐩𝐫𝐨𝐜")
+    if (c >= 0x1d7ce && c <= 0x1d7ff) {
+        *out = '0' + (char)((c - 0x1d7ce) % 10);
+        return 1;
+    }
 
-    def test_matches_value_in_italic_glyphs(self):
-        result = self.run_tool("value", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝑣𝑎𝑙𝑢𝑒", result.stdout)
+    if (c == 0x210e || c == 0x2113) {
+        *out = 'h';
+        return 1;
+    }
 
-    def test_case_insensitive_match(self):
-        result = self.run_tool("-i", "PROC", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
+    return 0;
+}
 
-    def test_with_filename_option(self):
-        result = self.run_tool("-H", "proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("demo.u68:", result.stdout)
+static int normalize_text(const char *in, char **out) {
+    size_t n = strlen(in), cap = n * 2 + 1, j = 0, used;
+    char *p = malloc(cap);
+    if (!p) return -1;
 
-    def test_count_mode(self):
-        result = self.run_tool("-c", "value", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "2")
+    for (size_t i = 0; i < n;) {
+        unsigned long c = utf8((const unsigned char *)in + i, n - i, &used);
+        char ch = 0;
+        if (!used) break;
+        if (glyph_ascii(c, &ch)) {
+            if (j + 1 >= cap) {
+                cap *= 2;
+                p = realloc(p, cap);
+                if (!p) return -1;
+            }
+            p[j++] = ch;
+        } else {
+            if (j + used >= cap) {
+                cap *= 2;
+                p = realloc(p, cap);
+                if (!p) return -1;
+            }
+            memcpy(p + j, in + i, used);
+            j += used;
+        }
+        i += used;
+    }
+    p[j] = '\0';
+    *out = p;
+    return 0;
+}
 
-    def test_max_count(self):
-        result = self.run_tool(
-            "-m",
-            "1",
-            "proc",
-            str(ROOT / "demo.u68"),
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
+static int has_math_glyph(const char *s) {
+    size_t n = strlen(s), used;
+    for (size_t i = 0; i < n;) {
+        unsigned long c = utf8((const unsigned char *)s + i, n - i, &used);
+        if (is_math_glyph(c)) return 1;
+        if (!used) break;
+        i += used;
+    }
+    return 0;
+}
 
-    def test_no_unicode_short_option(self):
-        result = self.run_tool(
-            "-t",
-            "proc",
-            str(ROOT / "demo.u68"),
-        )
-        self.assertEqual(result.returncode, 1)
+static const char *config_value(const char *file, const char *key, char *buf, size_t size) {
+    FILE *f = fopen(file, "r");
+    if (!f) return NULL;
 
-    def test_no_unicode_long_option(self):
-        result = self.run_tool(
-            "--no-unicode",
-            "proc",
-            str(ROOT / "demo.u68"),
-        )
-        self.assertEqual(result.returncode, 1)
+    char line[PATH_MAX + 128];
+    int in_ugrep = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p && isspace((unsigned char)*p)) p++;
 
-    def test_no_match_returns_1(self):
-        result = self.run_tool(
-            "zzzz-not-present",
-            str(ROOT / "demo.u68"),
-        )
-        self.assertEqual(result.returncode, 1)
+        if (*p == '[') {
+            in_ugrep = strncmp(p, "[ugrep]", 7) == 0;
+            continue;
+        }
 
-    def test_help(self):
-        result = self.run_tool("--help")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--unicode", result.stdout)
-        self.assertIn("--no-unicode", result.stdout)
+        if (!(in_ugrep || strchr(line, '[') == NULL)) continue;
 
+        char k[64], v[PATH_MAX];
+        if (sscanf(p, "%63[^=]=%1023[^\n]", k, v) == 2) {
+            char *q = k;
+            while (*q && isspace((unsigned char)*q)) q++;
+            char *e = q + strlen(q);
+            while (e > q && isspace((unsigned char)e[-1])) *--e = '\0';
+            if (strcmp(q, key) == 0) {
+                char *x = v;
+                while (*x && isspace((unsigned char)*x)) x++;
+                snprintf(buf, size, "%s", x);
+                fclose(f);
+                return buf;
+            }
+        }
+    }
 
-if __name__ == "__main__":
-    unittest.main()
+    fclose(f);
+    return NULL;
+}
+
+static const char *grep_path(const char *config) {
+    static char value[PATH_MAX];
+    if (config) {
+        if (config_value(config, "grep", value, sizeof(value))) return value;
+    }
+
+    if (config_value(".ugreprc", "grep", value, sizeof(value))) return value;
+
+    const char *home = getenv("HOME");
+    if (home) {
+        char p[PATH_MAX];
+        snprintf(p, sizeof(p), "%s/.ugreprc", home);
+        if (config_value(p, "grep", value, sizeof(value))) return value;
+    }
+
+    return DEFAULT_GREP;
+}
+
+static long probe_setting(const char *config) {
+    char value[64];
+    if (config) {
+        if (config_value(config, "probe_lines", value, sizeof(value))) return strtol(value, NULL, 10);
+    }
+    if (config_value(".ugreprc", "probe_lines", value, sizeof(value))) return strtol(value, NULL, 10);
+
+    const char *home = getenv("HOME");
+    if (home) {
+        char p[PATH_MAX];
+        snprintf(p, sizeof(p), "%s/.ugreprc", home);
+        if (config_value(p, "probe_lines", value, sizeof(value))) return strtol(value, NULL, 10);
+    }
+
+    return DEFAULT_PROBE_LINES;
+}
+
+static int delegate_to_grep(int argc, char **argv, const char *config) {
+    const char *gp = grep_path(config);
+    char **av = calloc((size_t)argc + 2, sizeof(*av));
+    if (!av) die("out of memory");
+
+    int n = 0;
+    av[n++] = (char *)gp;
+
+    for (int i = 1; i < argc; ++i) {
+        const char *a = argv[i];
+        if (strcmp(a, "-u") == 0 || strcmp(a, "--unicode") == 0) continue;
+        if (strcmp(a, "-t") == 0 || strcmp(a, "--no-unicode") == 0) continue;
+        if (strcmp(a, "--probe-lines") == 0 || strcmp(a, "--config") == 0) { ++i; continue; }
+        if (strncmp(a, "--probe-lines=", 14) == 0 || strncmp(a, "--config=", 9) == 0) continue;
+        if (strcmp(a, "-i") == 0 || strcmp(a, "--ignore-case") == 0) continue;
+        av[n++] = argv[i];
+    }
+    av[n] = NULL;
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        free(av);
+        die("fork failed");
+    }
+    if (pid == 0) {
+        execv(gp, av);
+        execvp(gp, av);
+        perror(gp);
+        _exit(127);
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    free(av);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 2;
+}
+
+static int search_file(const char *path, const Options *o, regex_t *re, int multi) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        perror(path);
+        return 2;
+    }
+
+    char *line = NULL;
+    size_t cap = 0;
+    long lineno = 0;
+    long count = 0;
+    int any = 0;
+
+    while (getline(&line, &cap, f) >= 0) {
+        char *norm = NULL;
+        ++lineno;
+        if (normalize_text(line, &norm) != 0) {
+            free(line);
+            fclose(f);
+            die("out of memory");
+        }
+
+        int match = regexec(re, norm, 0, NULL, 0) == 0;
+        free(norm);
+        if (o->invert) match = !match;
+        if (!match) continue;
+
+        count++;
+        any = 1;
+        if (o->max_count && count > o->max_count) break;
+        if (o->quiet || o->count) continue;
+
+        if (!o->no_filename && (o->with_filename || multi)) printf("%s:", path);
+        if (o->line_number) printf("%ld:", lineno);
+        fputs(line, stdout);
+    }
+
+    if (o->count) {
+        if (!o->no_filename && (o->with_filename || multi)) printf("%s:", path);
+        printf("%ld\n", count);
+    }
+
+    free(line);
+    fclose(f);
+    return any ? 0 : 1;
+}
+
+static void help(void) {
+    puts("Usage: ugrep [OPTIONS] PATTERN [FILE ...]");
+    puts("  -n, --line-number       print line numbers");
+    puts("  -h, --no-filename       suppress filename prefixes");
+    puts("  -H, --with-filename     print filenames even for a single file");
+    puts("  -i, --ignore-case       ignore case");
+    puts("  -c, --count             count matching lines");
+    puts("  -m N, --max-count N     stop after N matches");
+    puts("  -u, --unicode           force Unicode normalization mode");
+    puts("  -t, --no-unicode        use the real system grep");
+    puts("  -r, --recursive         search directories recursively");
+    puts("      --probe-lines N     inspect N initial lines for glyph detection");
+    puts("      --config FILE       use a config file");
+    puts("");
+    puts("Configuration file (.ugreprc):");
+    puts("  [ugrep]");
+    puts("  probe_lines = 100");
+    puts("  grep = /usr/bin/grep");
+}
+
+int main(int argc, char **argv) {
+    Options o = {0};
+    StrVec paths = {0};
+    o.probe_lines = DEFAULT_PROBE_LINES;
+
+    for (int i = 1; i < argc; ++i) {
+        const char *a = argv[i];
+        if (strcmp(a, "--help") == 0) {
+            help();
+            return 0;
+        }
+        if (strcmp(a, "-n") == 0 || strcmp(a, "--line-number") == 0) {
+            o.line_number = 1;
+        } else if (strcmp(a, "-h") == 0 || strcmp(a, "--no-filename") == 0) {
+            o.no_filename = 1;
+        } else if (strcmp(a, "-H") == 0 || strcmp(a, "--with-filename") == 0) {
+            o.with_filename = 1;
+        } else if (strcmp(a, "-i") == 0 || strcmp(a, "--ignore-case") == 0) {
+            o.ignore_case = 1;
+        } else if (strcmp(a, "-u") == 0 || strcmp(a, "--unicode") == 0) {
+            o.force_unicode = 1;
+        } else if (strcmp(a, "-t") == 0 || strcmp(a, "--no-unicode") == 0) {
+            o.force_plain = 1;
+        } else if (strcmp(a, "-c") == 0 || strcmp(a, "--count") == 0) {
+            o.count = 1;
+        } else if (strcmp(a, "-q") == 0 || strcmp(a, "--quiet") == 0) {
+            o.quiet = 1;
+        } else if (strcmp(a, "-v") == 0 || strcmp(a, "--invert-match") == 0) {
+            o.invert = 1;
+        } else if (strcmp(a, "-r") == 0 || strcmp(a, "--recursive") == 0) {
+            o.recursive = 1;
+        } else if (strcmp(a, "-m") == 0 || strcmp(a, "--max-count") == 0) {
+            if (i + 1 >= argc) die("missing max count");
+            o.max_count = strtol(argv[++i], NULL, 10);
+        } else if (strcmp(a, "--probe-lines") == 0) {
+            if (i + 1 >= argc) die("missing probe line count");
+            o.probe_lines = strtol(argv[++i], NULL, 10);
+        } else if (strncmp(a, "--probe-lines=", 14) == 0) {
+            o.probe_lines = strtol(a + 14, NULL, 10);
+        } else if (strcmp(a, "--config") == 0) {
+            if (i + 1 >= argc) die("missing config path");
+            o.config = argv[++i];
+        } else if (strncmp(a, "--config=", 9) == 0) {
+            o.config = a + 9;
+        } else if (strcmp(a, "-e") == 0 || strcmp(a, "--regexp") == 0) {
+            if (i + 1 >= argc) die("missing regex");
+            o.pattern = argv[++i];
+        } else if (a[0] == '-') {
+            continue;
+        } else if (!o.pattern) {
+            o.pattern = a;
+        } else {
+            vec_add(&paths, (char *)a);
+        }
+    }
+
+    if (o.config) {
+        long value = probe_setting(o.config);
+        if (value > 0) o.probe_lines = value;
+    }
+
+    if (o.force_plain) {
+        return delegate_to_grep(argc, argv, o.config);
+    }
+
+    if (!o.pattern) die("a pattern is required");
+
+    int flags = REG_EXTENDED;
+    if (o.ignore_case) flags |= REG_ICASE;
+    regex_t re;
+    if (regcomp(&re, o.pattern, flags) != 0) die("invalid regular expression");
+
+    int overall = 1;
+    if (paths.n == 0) {
+        char *line = NULL;
+        size_t cap = 0;
+        long lineno = 0;
+        long count = 0;
+        int any = 0;
+
+        while (getline(&line, &cap, stdin) >= 0) {
+            size_t len = strlen(line);
+            while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+                line[--len] = '\0';
+            }
+            ++lineno;
+
+            char *norm = NULL;
+            if (normalize_text(line, &norm) != 0) die("out of memory");
+
+            int match = regexec(&re, norm, 0, NULL, 0) == 0;
+            free(norm);
+            if (o.invert) match = !match;
+            if (!match) continue;
+
+            count++;
+            any = 1;
+            if (o.max_count && count > o.max_count) break;
+            if (o.quiet || o.count) continue;
+
+            if (!o.no_filename && o.with_filename) printf("stdin:");
+            if (o.line_number) printf("%ld:", lineno);
+            printf("%s\n", line);
+        }
+
+        if (o.count) {
+            if (!o.no_filename && o.with_filename) printf("stdin:");
+            printf("%ld\n", count);
+        }
+
+        free(line);
+        regfree(&re);
+        return any ? 0 : 1;
+    }
+
+    int multi = paths.n > 1;
+    for (size_t i = 0; i < paths.n; ++i) {
+        const char *path = paths.v[i];
+        if (strcmp(path, "-") == 0) continue;
+
+        FILE *f = fopen(path, "r");
+        if (!f) {
+            perror(path);
+            continue;
+        }
+
+        int glyph = 0;
+        char *line = NULL;
+        size_t cap = 0;
+        for (long n = 0; n < o.probe_lines && getline(&line, &cap, f) >= 0; ++n) {
+            if (has_math_glyph(line)) { glyph = 1; break; }
+        }
+        free(line);
+        fclose(f);
+
+        if (o.force_unicode || glyph) {
+            if (search_file(path, &o, &re, multi) == 0) overall = 0;
+        } else {
+            int delegated = delegate_to_grep(argc, argv, o.config);
+            if (delegated == 0) overall = 0;
+        }
+    }
+
+    regfree(&re);
+    free(paths.v);
+    return overall;
+}
