@@ -1,122 +1,21 @@
-import subprocess
-import unittest
-from pathlib import Path
+CC ?= cc
+CFLAGS ?= -O2 -Wall -Wextra -std=c11
+PREFIX ?= /usr/local
 
+.PHONY: all clean install test
 
-ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "ugrep"
+all: ugrep
 
+ugrep: ugrep.c
+	$(CC) $(CFLAGS) -o $@ $<
+	chmod 755 $@
 
-def build_binary():
-    result = subprocess.run(
-        ["make", "-C", str(ROOT), "clean"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Failed to clean build:\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
-        )
+install: ugrep
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 ugrep $(DESTDIR)$(PREFIX)/bin/ugrep
 
-    result = subprocess.run(
-        ["make", "-C", str(ROOT), "ugrep"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Failed to build ugrep:\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
-        )
+clean:
+	rm -f ugrep
 
-
-class UnicodeGlyphGrepTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        build_binary()
-
-    def run_tool(self, *args):
-        return subprocess.run(
-            [str(BINARY), *args],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    def test_matches_proc_in_glyphs(self):
-        result = self.run_tool("proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
-
-    def test_line_numbers_in_unicode_mode(self):
-        result = self.run_tool("-n", "proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(result.stdout, r"(?m)^17:.*𝐩𝐫𝐨𝐜")
-
-    def test_matches_value_in_italic_glyphs(self):
-        result = self.run_tool("value", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝑣𝑎𝑙𝑢𝑒", result.stdout)
-
-    def test_case_insensitive_match(self):
-        result = self.run_tool("-i", "PROC", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
-
-    def test_with_filename_option(self):
-        result = self.run_tool("-H", "proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("demo.u68:", result.stdout)
-
-    def test_count_mode(self):
-        result = self.run_tool("-c", "value", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "2")
-
-    def test_max_count(self):
-        result = self.run_tool(
-            "-m",
-            "1",
-            "proc",
-            str(ROOT / "demo.u68"),
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("𝐩𝐫𝐨𝐜", result.stdout)
-
-    def test_no_unicode_short_option(self):
-        result = self.run_tool("-t", "proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 1)
-
-    def test_no_unicode_long_option(self):
-        result = self.run_tool("--no-unicode", "proc", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 1)
-
-    def test_no_match_returns_1(self):
-        result = self.run_tool("zzzz-not-present", str(ROOT / "demo.u68"))
-        self.assertEqual(result.returncode, 1)
-
-    def test_help(self):
-        result = self.run_tool("--help")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--unicode", result.stdout)
-        self.assertIn("--no-unicode", result.stdout)
-
-    def test_pipe_matches_file(self):
-        file_result = self.run_tool("proc", str(ROOT / "demo.u68"))
-        pipe_result = subprocess.run(
-            ["bash", "-lc", f"cat '{ROOT / 'demo.u68'}' | '{BINARY}' proc"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(pipe_result.returncode, file_result.returncode, pipe_result.stderr)
-        self.assertEqual(pipe_result.stdout, file_result.stdout)
-
-
-if __name__ == "__main__":
-    unittest.main()
+test: ugrep
+	python3 -m unittest discover -s tests -v
